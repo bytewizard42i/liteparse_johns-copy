@@ -51,7 +51,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
 
-          - os: ubuntu-latest
+          - os: ubuntu-latest-arm
             target: aarch64-unknown-linux-gnu
 
           - os: windows-latest
@@ -63,12 +63,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -76,6 +70,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtesseract-dev libleptonica-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -101,9 +101,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: >-
-            --release --out dist --find-interpreter
-            ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--no-default-features' || '' }}
+          args: --release --out dist --find-interpreter
           manylinux: 2_28
           working-directory: packages/python
           before-script-linux: |
@@ -301,9 +299,8 @@ jobs:
             os: ubuntu-latest
             artifact: lit-linux-x64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-latest-arm
             artifact: lit-linux-arm64
-            use-cross: true
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: lit-darwin-arm64
@@ -316,18 +313,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install system dependencies (Linux native)
-        if: runner.os == 'Linux' && !matrix.use-cross
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libtesseract-dev libleptonica-dev
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.use-cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -344,12 +334,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-cli-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
-        run: |
-          if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cargo build --release --target ${{ matrix.target }} --no-default-features
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
