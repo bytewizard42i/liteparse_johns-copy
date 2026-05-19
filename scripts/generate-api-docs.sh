@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Generates API reference docs from TypeDoc and outputs a single
-# Starlight-compatible markdown file with frontmatter.
+# Generates API reference docs from rustdoc JSON via rustdoc-md and outputs
+# a single Starlight-compatible markdown file with frontmatter.
 set -euo pipefail
 
 DOCS_DIR="./docs/src/content/docs/liteparse"
 TMP_DIR="${DOCS_DIR}/.api-tmp"
 OUT_FILE="${DOCS_DIR}/api.md"
 
-# Generate markdown with TypeDoc
+# Generate rustdoc JSON and convert to markdown
 mkdir -p $TMP_DIR
 cd crates/liteparse/
 cargo +nightly rustdoc --lib -- -Z unstable-options --output-format json
@@ -19,7 +19,7 @@ rustdoc-md --path ./target/doc/liteparse.json --output ${TMP_DIR}/README.md
 cat > "${OUT_FILE}" <<'FRONTMATTER'
 ---
 title: API Reference
-description: API reference for the @llamaindex/liteparse TypeScript library.
+description: API reference for the liteparse Rust crate. Types are shared across Node.js, Python, and WASM bindings.
 sidebar:
   order: 6
 ---
