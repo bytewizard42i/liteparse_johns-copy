@@ -166,10 +166,18 @@ fn extract_page_text_items(
     // Hard limit: gaps larger than this always cause a split (column breaks).
     const MAX_INLINE_GAP: f32 = 15.0;
 
+    let debug = std::env::var("LITEPARSE_DEBUG").is_ok();
+
     // Pre-scan: check if ALL text on this page is invisible (render mode 3).
     // Some scanned PDFs have an invisible OCR text layer as the only text.
     // In that case we should use the invisible text rather than skipping it.
     let skip_invisible = should_skip_invisible(text_page, char_count);
+
+    if debug {
+        eprintln!(
+            "[extract-debug] char_count={char_count}, skip_invisible={skip_invisible}"
+        );
+    }
 
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
@@ -183,12 +191,19 @@ fn extract_page_text_items(
 
         // Skip null / invalid sentinels
         if unicode == 0 || unicode == 0xFFFE || unicode == 0xFFFF {
+            if debug {
+                eprintln!("[extract-debug] i={i} SKIP sentinel unicode=0x{unicode:04X}");
+            }
             continue;
         }
 
         // Skip invisible text (render mode 3) only when the page also has visible text.
         // If all text is invisible, it's likely an OCR text layer and we should keep it.
         if skip_invisible && ch.text_render_mode() == Some(3) {
+            if debug {
+                let c_display = char::from_u32(unicode).unwrap_or('?');
+                eprintln!("[extract-debug] i={i} SKIP invisible char='{c_display}' unicode=0x{unicode:04X}");
+            }
             continue;
         }
 
@@ -205,7 +220,12 @@ fn extract_page_text_items(
             0x1F => ('f', "l"),  // fl ligature
             _ => match char::from_u32(unicode) {
                 Some(ch_mapped) => (ch_mapped, ""),
-                None => continue,
+                None => {
+                    if debug {
+                        eprintln!("[extract-debug] i={i} SKIP invalid unicode=0x{unicode:04X}");
+                    }
+                    continue;
+                }
             },
         };
 
@@ -223,22 +243,37 @@ fn extract_page_text_items(
 
         // Skip non-space generated characters (synthetic glyphs)
         if is_generated {
+            if debug {
+                eprintln!("[extract-debug] i={i} SKIP generated char='{c}' unicode=0x{unicode:04X}");
+            }
             continue;
         }
 
         // Get loose bounds in viewport space for the item bounding box
         let Some(loose_box) = ch.loose_char_box() else {
+            if debug {
+                eprintln!("[extract-debug] i={i} SKIP no loose_char_box char='{c}'");
+            }
             continue;
         };
         let vp_loose = vp_xform.transform_bounds(&loose_box);
 
         // Skip zero-height characters (phantom dots from dot leader decorations)
         if vp_loose.bottom - vp_loose.top < 0.5 {
+            if debug {
+                eprintln!(
+                    "[extract-debug] i={i} SKIP zero-height char='{c}' height={:.2} vp=({:.1},{:.1})-({:.1},{:.1})",
+                    vp_loose.bottom - vp_loose.top, vp_loose.left, vp_loose.top, vp_loose.right, vp_loose.bottom
+                );
+            }
             continue;
         }
 
         // Also get strict char box for gap calculation (stays in viewport space)
         let Some(strict_box) = ch.char_box() else {
+            if debug {
+                eprintln!("[extract-debug] i={i} SKIP no char_box char='{c}'");
+            }
             continue;
         };
         let strict_rect = RectF {
@@ -312,17 +347,31 @@ fn extract_page_text_items(
 
     seg.flush(&mut items);
 
+    if debug {
+        eprintln!("[extract-debug] items before dedup: {}", items.len());
+    }
+
     // Dedup: remove items with identical text and overlapping bounding boxes.
     // Some PDFs (especially those with chart/figure annotations) produce duplicate
     // text objects at the same position.
-    dedup_overlapping_items(&mut items);
+    let pre_dedup_count = items.len();
+    dedup_overlapping_items(&mut items, debug);
+
+    if debug && items.len() < pre_dedup_count {
+        eprintln!(
+            "[extract-debug] dedup removed {} items ({} → {})",
+            pre_dedup_count - items.len(),
+            pre_dedup_count,
+            items.len()
+        );
+    }
 
     Ok(items)
 }
 
 /// Remove duplicate text items: exact text matches with any bbox overlap,
 /// and near-duplicates (different text) with high bbox overlap (>50% area).
-fn dedup_overlapping_items(items: &mut Vec<TextItem>) {
+fn dedup_overlapping_items(items: &mut Vec<TextItem>, debug: bool) {
     if items.len() < 2 {
         return;
     }
@@ -358,12 +407,41 @@ fn dedup_overlapping_items(items: &mut Vec<TextItem>) {
             if items[i].text == items[j].text {
                 // Exact text match: any overlap → drop the earlier item
                 // (later items are rendered on top in PDF paint order)
+                if debug {
+                    eprintln!(
+                        "[extract-debug] DEDUP exact-match drop i={i} text='{}' at ({:.1},{:.1}) in favor of j={j} at ({:.1},{:.1})",
+                        items[i].text, items[i].x, items[i].y, items[j].x, items[j].y
+                    );
+                }
                 keep[i] = false;
                 break; // i is gone, move to next i
             } else if smaller_area > 0.0 && intersection / smaller_area > 0.5 {
                 // Different text but >50% overlap of the smaller item:
                 // likely overlapping text layers (e.g. old/new branding).
                 // Keep the later one (rendered on top in PDF paint order).
+                //
+                // However, skip dedup when the items have very different sizes
+                // (area ratio > 5x). This happens when a small cell value sits
+                // inside a row-spanning element like a dotted leader — these are
+                // separate content, not overlapping layers.
+                let larger_area = area_a.max(area_b);
+                if larger_area / smaller_area > 5.0 {
+                    if debug {
+                        eprintln!(
+                            "[extract-debug] DEDUP skip (area ratio {:.1}x) i={i} text='{}' j={j} text='{}'",
+                            larger_area / smaller_area, items[i].text, items[j].text
+                        );
+                    }
+                    continue;
+                }
+                if debug {
+                    eprintln!(
+                        "[extract-debug] DEDUP overlap drop i={i} text='{}' at ({:.1},{:.1} {}x{}) in favor of j={j} text='{}' at ({:.1},{:.1} {}x{}) overlap_ratio={:.2}",
+                        items[i].text, items[i].x, items[i].y, items[i].width, items[i].height,
+                        items[j].text, items[j].x, items[j].y, items[j].width, items[j].height,
+                        intersection / smaller_area
+                    );
+                }
                 keep[i] = false;
                 break; // i is gone, move to next i
             }
@@ -738,7 +816,7 @@ mod tests {
             ti("hello", 0.0, 0.0, 10.0, 5.0),
             ti("hello", 1.0, 0.0, 10.0, 5.0),
         ];
-        dedup_overlapping_items(&mut items);
+        dedup_overlapping_items(&mut items, false);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].x, 1.0);
     }
@@ -746,7 +824,7 @@ mod tests {
     #[test]
     fn dedup_keeps_non_overlapping() {
         let mut items = vec![ti("a", 0.0, 0.0, 5.0, 5.0), ti("b", 100.0, 100.0, 5.0, 5.0)];
-        dedup_overlapping_items(&mut items);
+        dedup_overlapping_items(&mut items, false);
         assert_eq!(items.len(), 2);
     }
 
@@ -756,7 +834,7 @@ mod tests {
             ti("old", 0.0, 0.0, 10.0, 5.0),
             ti("new", 0.0, 0.0, 10.0, 5.0),
         ];
-        dedup_overlapping_items(&mut items);
+        dedup_overlapping_items(&mut items, false);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "new");
     }
@@ -767,17 +845,17 @@ mod tests {
             ti("aaa", 0.0, 0.0, 10.0, 5.0),
             ti("bbb", 9.0, 0.0, 10.0, 5.0),
         ];
-        dedup_overlapping_items(&mut items);
+        dedup_overlapping_items(&mut items, false);
         assert_eq!(items.len(), 2);
     }
 
     #[test]
     fn dedup_noop_for_empty_or_single() {
         let mut empty: Vec<TextItem> = vec![];
-        dedup_overlapping_items(&mut empty);
+        dedup_overlapping_items(&mut empty, false);
         assert!(empty.is_empty());
         let mut one = vec![ti("x", 0.0, 0.0, 1.0, 1.0)];
-        dedup_overlapping_items(&mut one);
+        dedup_overlapping_items(&mut one, false);
         assert_eq!(one.len(), 1);
     }
 
