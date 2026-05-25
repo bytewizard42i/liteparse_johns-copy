@@ -105,7 +105,7 @@ jobs:
             -w /work/packages/node \
             node:20-alpine \
             sh -c '
-              apk add --no-cache build-base cmake git curl pkgconf tesseract-ocr-dev leptonica-dev perl
+              apk add --no-cache build-base cmake git curl pkgconf tesseract-ocr-dev leptonica-dev perl openssl-dev
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable -t x86_64-unknown-linux-musl
               source /root/.cargo/env
               npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target x86_64-unknown-linux-musl .
