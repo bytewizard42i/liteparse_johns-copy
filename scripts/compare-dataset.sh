@@ -85,10 +85,12 @@ while IFS= read -r document; do
       fi
 
       # Get actual text for this page
+      PAGE_EXISTS=$(echo "$CURRENT_JSON" | jq --argjson page "$EXPECTED_PAGE" \
+        '[.pages[] | select(.page == $page)] | length' 2>/dev/null)
       ACTUAL_TEXT=$(echo "$CURRENT_JSON" | jq -r --argjson page "$EXPECTED_PAGE" \
         '.pages[] | select(.page == $page) | .text // ""' 2>/dev/null)
 
-      if [ -z "$ACTUAL_TEXT" ] && [ "$EXPECTED_PAGE" -ne 0 ]; then
+      if [ "$PAGE_EXISTS" = "0" ] && [ "$EXPECTED_PAGE" -ne 0 ]; then
         # Page not found in current output
         DIFF_OUTPUT+="[REMOVED] $document (page $EXPECTED_PAGE)"$'\n\n'
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
