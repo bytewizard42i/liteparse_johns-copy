@@ -1,7 +1,7 @@
 use crate::error::LiteParseError;
+use crate::extract::load_document_from_input;
 use crate::types::PdfInput;
 use image::ImageEncoder;
-use pdfium::Library;
 use serde::Serialize;
 
 /// A single rendered page as PNG bytes.
@@ -20,17 +20,8 @@ pub fn render_pages_to_png(
     dpi: f32,
     password: Option<&str>,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
-    let lib = Library::init();
-    match input {
-        PdfInput::Path(path) => {
-            let document = lib.load_document(path, password)?;
-            render_document_pages(&document, page_numbers, dpi)
-        }
-        PdfInput::Bytes(data) => {
-            let document = lib.load_document_from_bytes(data, password)?;
-            render_document_pages(&document, page_numbers, dpi)
-        }
-    }
+    let document = load_document_from_input(input, password)?;
+    render_document_pages(&document, page_numbers, dpi)
 }
 
 fn render_document_pages(
@@ -130,8 +121,7 @@ struct ImageBoundsOutput {
 
 /// Extract image bounding boxes and print as JSON to stdout.
 pub fn image_bounds(pdf_path: &str, page_num: Option<u32>) -> Result<(), LiteParseError> {
-    let lib = Library::init();
-    let document = lib.load_document(pdf_path, None)?;
+    let document = load_document_from_input(&PdfInput::Path(pdf_path.to_string()), None)?;
     let page_count = document.page_count();
 
     for page_index in 0..page_count {
