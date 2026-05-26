@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Fast, lightweight PDF and document parsing with spatial text extraction"
+readme = "README.md"
 
 [lib]
 name = "liteparse"
