@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 2.1.0)'
+        description: "Version to release (e.g. 2.1.0)"
         required: true
         type: string
       beta:
-        description: 'Publish as beta (npm tag: beta instead of latest)'
+        description: "Publish as beta (npm tag: beta instead of latest)"
         type: boolean
         default: false
       dry-run:
-        description: 'Dry run (build but do not publish)'
+        description: "Dry run (build but do not publish)"
         type: boolean
         default: false
 
@@ -118,6 +118,7 @@ jobs:
       - name: Build native module (musl container)
         if: ${{ matrix.use-container }}
         run: |
+          chmod +x scripts/build-alpine.sh
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/work \
             -v "$HOME/.cargo/registry":/root/.cargo/registry \
@@ -125,26 +126,7 @@ jobs:
             -v "$HOME/.cache/pdfium-rs":/root/.cache/pdfium-rs \
             -w /work/packages/node \
             node:20-alpine \
-            sh -c '
-              set -eux
-              # Static libs needed because musl rust defaults to -static-pie / crt-static
-              # for build scripts. openssl-libs-static/zlib-static satisfy tesseract-rs build-deps.
-              # tesseract-rs's build.rs hard-codes -DCMAKE_CXX_COMPILER=clang++ and
-              # -stdlib=libc++, so we need real clang + libc++ in the image; gcc/g++ from
-              # build-base alone is not enough.
-              apk add --no-cache \
-                build-base cmake git curl pkgconf perl \
-                clang libc++-dev \
-                tesseract-ocr-dev leptonica-dev \
-                openssl-dev openssl-libs-static zlib-static
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable -t x86_64-unknown-linux-musl
-              . /root/.cargo/env
-              # napi produces a cdylib (.node) which MUST be dynamically linked against libc,
-              # so disable crt-static for the final link. Build scripts still link static
-              # against openssl/zlib via the static libs above.
-              export RUSTFLAGS="-C target-feature=-crt-static"
-              npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target x86_64-unknown-linux-musl .
-            '
+            /work/scripts/build-alpine.sh
 
       - name: Copy pdfium dylib (Unix)
         if: runner.os != 'Windows'
