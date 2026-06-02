@@ -48,6 +48,11 @@ jobs:
             node-arch: darwin-arm64
             pdfium-dylib: libpdfium.dylib
 
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            node-arch: darwin-x64
+            pdfium-dylib: libpdfium.dylib
+
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             node-arch: linux-x64-gnu
@@ -67,6 +72,11 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             node-arch: win32-x64-msvc
+            pdfium-dylib: pdfium.dll
+
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            node-arch: win32-arm64-msvc
             pdfium-dylib: pdfium.dll
 
     runs-on: ${{ matrix.os }}
@@ -176,10 +186,14 @@ jobs:
         include:
           - os: macos-latest
             node-arch: darwin-arm64
+          - os: macos-26-intel
+            node-arch: darwin-x64
           - os: ubuntu-latest
             node-arch: linux-x64-gnu
           - os: windows-latest
             node-arch: win32-x64-msvc
+          - os: windows-11-arm
+            node-arch: win32-arm64-msvc
     runs-on: ${{ matrix.os }}
     name: Test ${{ matrix.node-arch }}
 
@@ -230,6 +244,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: lit-darwin-arm64
+          - target: x86_64-apple-darwin
+            os: macos-26-intel
+            artifact: lit-darwin-x64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -325,10 +342,12 @@ jobs:
         run: |
           declare -A PLATFORMS=(
             ["darwin-arm64"]="aarch64-apple-darwin"
+            ["darwin-x64"]="x86_64-apple-darwin"
             ["linux-x64-gnu"]="x86_64-unknown-linux-gnu"
             ["linux-x64-musl"]="x86_64-unknown-linux-musl"
             ["linux-arm64-gnu"]="aarch64-unknown-linux-gnu"
             ["win32-x64-msvc"]="x86_64-pc-windows-msvc"
+            ["win32-arm64-msvc"]="aarch64-pc-windows-msvc"
           )
 
           for ARCH in "${!PLATFORMS[@]}"; do
@@ -350,11 +369,13 @@ jobs:
 
             LIBC=""
             case "$ARCH" in
-              darwin-arm64)    OS="darwin"; CPU="arm64" ;;
+              darwin-arm64)  OS="darwin"; CPU="arm64" ;;
+              darwin-x64)    OS="darwin"; CPU="x64" ;;
+              win32-x64-msvc) OS="win32"; CPU="x64" ;;
+              win32-arm64-msvc) OS="win32"; CPU="arm64" ;;
               linux-x64-gnu)   OS="linux";  CPU="x64"; LIBC="glibc" ;;
               linux-x64-musl)  OS="linux";  CPU="x64"; LIBC="musl" ;;
               linux-arm64-gnu) OS="linux";  CPU="arm64"; LIBC="glibc" ;;
-              win32-x64-msvc)  OS="win32";  CPU="x64" ;;
             esac
 
             VERSION=${{ inputs.version }}
