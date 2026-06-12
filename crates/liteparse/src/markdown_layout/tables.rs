@@ -369,7 +369,12 @@ fn infer_tracks_from_raw_items(lines: &[ProjectedLine], start_idx: usize) -> Vec
         rows_used += 1;
     }
     xs.sort_by(f32::total_cmp);
-    let mut clusters: Vec<f32> = Vec::new();
+    // Each cluster carries its support = how many raw item x's fell into it.
+    // A genuine column recurs once per body row, so its support ≈ the row
+    // count; a header line sitting a few points off the data anchor (a
+    // centered "Number of" above a right-aligned numeric column) injects a
+    // separate cluster supported by a single item.
+    let mut clusters: Vec<(f32, usize)> = Vec::new();
     let mut current_sum = 0.0f32;
     let mut current_count = 0usize;
     let mut current_anchor = f32::NEG_INFINITY;
@@ -379,16 +384,27 @@ fn infer_tracks_from_raw_items(lines: &[ProjectedLine], start_idx: usize) -> Vec
             current_count += 1;
             current_anchor = current_sum / current_count as f32;
         } else {
-            clusters.push(current_sum / current_count as f32);
+            clusters.push((current_sum / current_count as f32, current_count));
             current_sum = x;
             current_count = 1;
             current_anchor = x;
         }
     }
     if current_count > 0 {
-        clusters.push(current_sum / current_count as f32);
+        clusters.push((current_sum / current_count as f32, current_count));
     }
-    clusters
+    // Prune single-item phantom tracks when there is a clear multi-row body
+    // (some cluster supported by ≥3 items). Without this, header cells offset
+    // from their data column manufacture extra close-spaced tracks that
+    // collapse `min_gap` and force the inferred path to bail, dropping back to
+    // the header-seeded path that silently discards an unaligned column.
+    // Conservative: only prunes when a strong body signal exists, and only the
+    // weakest (single-item) clusters, so small/sparse tables are untouched.
+    let max_support = clusters.iter().map(|c| c.1).max().unwrap_or(0);
+    if max_support >= 3 {
+        clusters.retain(|c| c.1 >= 2);
+    }
+    clusters.into_iter().map(|c| c.0).collect()
 }
 
 /// Build a row's cells against a fixed set of column anchors. Each raw item
@@ -731,39 +747,63 @@ fn try_detect_table_inferred(
     // shred-on-whitespace seed that's indistinguishable from a real
     // table. Subsequent rows can still have merged spans recovered via
     // the multi-cover split path.
+    //
+    // The strong row need not be `start_idx` itself: a stacked or partial
+    // header (a centered "Number of" above a right-aligned numeric column,
+    // fewer cells than the body) legitimately leads the table. Scan forward
+    // for the first strong row and seed the body there; `finalize_table_run`
+    // absorbs the header lines above it. Without this the body would be seeded
+    // on the header, the run would break at the first unalignable header cell,
+    // and the table would fall to the header-seeded path that drops a column.
     let tol = TABLE_TRACK_TOLERANCE_PT;
-    let seed_spans: Vec<&TextItem> = lines[start_idx]
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .collect();
-    if seed_spans.len() < tracks.len() {
-        bail!("seed_spans {} < tracks {}", seed_spans.len(), tracks.len());
-    }
-    for s in &seed_spans {
-        let x0 = s.x;
-        let x1 = s.x + s.width.max(0.0);
-        let covered = tracks
+    let is_strong_row = |line: &ProjectedLine| -> bool {
+        let spans: Vec<&TextItem> = line
+            .spans
             .iter()
-            .filter(|&&t| t >= x0 - tol && t <= x1 + tol)
-            .count();
-        if covered > 1 {
-            bail!(
-                "seed span \"{:.20}\" covers {covered} tracks",
-                s.text.trim()
-            );
+            .filter(|s| !s.text.trim().is_empty())
+            .collect();
+        if spans.len() < tracks.len() {
+            return false;
+        }
+        spans.iter().all(|s| {
+            let x0 = s.x;
+            let x1 = s.x + s.width.max(0.0);
+            tracks
+                .iter()
+                .filter(|&&t| t >= x0 - tol && t <= x1 + tol)
+                .count()
+                == 1
+        })
+    };
+    let mut body_start = None;
+    {
+        let mut k = start_idx;
+        let mut used = 0;
+        while k < lines.len() && used < TABLE_TRACK_INFERENCE_MAX_ROWS {
+            if k > start_idx && !table_rows_adjacent(&lines[k - 1], &lines[k]) {
+                break;
+            }
+            if is_strong_row(&lines[k]) {
+                body_start = Some(k);
+                break;
+            }
+            k += 1;
+            used += 1;
         }
     }
-    let Some(first) = cells_from_raw_items_with_tracks(&lines[start_idx], &tracks) else {
-        bail!("seed row cells unassignable");
+    let Some(body_start) = body_start else {
+        bail!("no strong body row in window");
+    };
+    let Some(first) = cells_from_raw_items_with_tracks(&lines[body_start], &tracks) else {
+        bail!("body row cells unassignable");
     };
     if first.iter().filter(|c| !c.text.is_empty()).count() < TABLE_MIN_COLUMNS {
-        bail!("seed populated cells < MIN_COLUMNS");
+        bail!("body populated cells < MIN_COLUMNS");
     }
     let mut rows: Vec<(usize, &ProjectedLine, Vec<TableCell>)> =
-        vec![(start_idx, &lines[start_idx], first)];
+        vec![(body_start, &lines[body_start], first)];
 
-    let mut j = start_idx + 1;
+    let mut j = body_start + 1;
     while j < lines.len() {
         if lines[j].bbox.x > tracks_right_edge {
             j += 1;
@@ -795,6 +835,16 @@ fn try_detect_table_inferred(
     if rows.len() < TABLE_MIN_ROWS {
         bail!("rows {} < MIN_ROWS", rows.len());
     }
+    // When the body was seeded below `start_idx` (the lead line was a header
+    // we skipped over to find a strong row), demand a clearly multi-row body
+    // before committing. A strong row found inside a header band can otherwise
+    // anchor a 2-row pseudo-table that consumes the lead lines and starves the
+    // header-seeded path of the real table below it (doc 117/187 lost their
+    // tables this way). Already-strong seeds (body_start == start_idx) keep the
+    // standard MIN_ROWS threshold and are unaffected.
+    if body_start > start_idx && rows.len() < 3 {
+        bail!("advanced body_start but only {} rows", rows.len());
+    }
     let cv = row_spacing_cv(&rows);
     if cv > TABLE_ROW_SPACING_MAX_CV {
         // Defer to the existing path, which can fall back to GridFallback.
@@ -805,7 +855,7 @@ fn try_detect_table_inferred(
     let bold_eligible = rows[0].2.iter().all(|c| c.bold && !c.text.is_empty());
     finalize_table_run(
         lines,
-        start_idx,
+        body_start,
         floor,
         &rows,
         &track_ranges,

@@ -727,6 +727,35 @@ fn form_lines(
                 let y_diff = (item.item.y - prev.item.y).abs();
                 let y_compatible = y_diff <= 1.5;
 
+                // Decimal-fragment continuation: PDFium sometimes emits the
+                // fractional part of a number ("15.6", "200.4") as a separate,
+                // x-contiguous run beginning with the decimal point (".6").
+                // `both_are_numbers` below treats them as two distinct table
+                // values and keeps them apart, leaving "15 .6" in the rendered
+                // cell and injecting a spurious column track between them. A
+                // real pair of adjacent table numbers always has a visible
+                // inter-cell gap, never a digit butted directly against a
+                // leading-decimal run, so this is safe to join silently.
+                let is_decimal_continuation = y_compatible
+                    && delta_x <= 1.0
+                    && delta_x >= -2.0
+                    && prev
+                        .item
+                        .text
+                        .chars()
+                        .last()
+                        .is_some_and(|c| c.is_ascii_digit())
+                    && {
+                        let mut cs = item.item.text.chars();
+                        cs.next() == Some('.') && cs.next().is_some_and(|c| c.is_ascii_digit())
+                    };
+                if is_decimal_continuation {
+                    prev.item.width = item.item.x + item.item.width - prev.item.x;
+                    prev.item.text.push_str(&item.item.text);
+                    merge_orig_bbox(prev, &item);
+                    continue;
+                }
+
                 // Word-boundary guard: when prev ends with an alphabetic
                 // character and item starts with one, a positive delta_x is
                 // very likely a missing-space gap (PDFium omitted the space
