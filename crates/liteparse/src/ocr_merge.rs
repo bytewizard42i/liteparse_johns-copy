@@ -4,6 +4,7 @@ use crate::error::LiteParseError;
 use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
 use crate::types::{Page, TextItem};
 use pdfium::{Document, ImageBounds};
+use serde::Serialize;
 
 /// Minimum dark filled-path area (pt², ~72 DPI page space) not covered by
 /// native text before a page is sent to OCR. 400 pt² is roughly one word at
@@ -22,6 +23,87 @@ pub(crate) struct RenderedPage {
     pub height: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PageComplexityStats {
+    pub page_number: usize,
+    pub text_length: usize,
+    pub text_coverage: f32,
+    pub has_substantial_images: bool,
+    /// Filled vector-outline area not covered by native text, in pt². `None`
+    /// when a cheaper predicate already flagged the page for OCR, so this
+    /// expensive page-object walk was skipped (it wasn't the deciding signal).
+    pub uncovered_vector_area: Option<f32>,
+    pub is_garbled: bool,
+    pub page_area: f32,
+    pub needs_ocr: bool,
+}
+
+pub(crate) fn calculate_page_complexity(
+    page: &Page,
+    page_obj: &pdfium::Page,
+) -> Result<PageComplexityStats, LiteParseError> {
+    // Count only usable native text. Substitution-cipher-style corrupt
+    // encodings (e.g. PDFs with a broken cmap) produce long "text" that looks
+    // populated but is unreadable — without this, such pages bypass OCR
+    // because text_length >= 20 and coverage looks fine. The same applies to
+    // unmappable items (Type3 fonts with no ToUnicode), whose text is a
+    // char-code fallback and whose bounding boxes come from deceptive
+    // declared metrics.
+    let text_length: usize = page
+        .text_items
+        .iter()
+        .filter(|item| !is_unusable_native(item))
+        .map(|item| item.text.len())
+        .sum();
+    let has_images = !page_obj.image_bounds(25.0, 0.9).is_empty();
+
+    let page_area = page.page_width * page.page_height;
+    let text_bbox_area: f32 = page
+        .text_items
+        .iter()
+        .filter(|item| !is_unusable_native(item))
+        .map(|item| item.width * item.height)
+        .sum();
+    let text_coverage = if page_area > 0.0 {
+        text_bbox_area / page_area
+    } else {
+        0.0
+    };
+
+    // Low spatial coverage only signals a scan/sparse page when there also
+    // isn't much native text. A text-dense page (e.g. a ruled table with
+    // wide intra-cell whitespace) is spatially sparse but needs no OCR.
+    let sparse_text = text_length < 2000 && text_coverage < 0.15;
+    let is_garbled = page_is_garbled(page);
+    let mut needs_ocr = text_length < 20 || sparse_text || has_images || is_garbled;
+
+    // Text drawn as filled vector outlines lives outside the text layer
+    // entirely: no text items, no image XObjects, so none of the cheap
+    // predicates fire on such a text-dense page. Detect it by measuring filled
+    // path area that native text doesn't account for. Checked last so this
+    // relatively expensive page-object walk only runs when the cheap predicates
+    // all pass; when they don't, the area is left unmeasured (`None`).
+    let uncovered_vector_area = if !needs_ocr {
+        let path_bounds = page_obj.filled_path_bounds(3.0, 0.9);
+        let uncovered = uncovered_path_area(&path_bounds, &page.text_items);
+        needs_ocr = uncovered >= UNCOVERED_VECTOR_AREA_THRESHOLD;
+        Some(uncovered)
+    } else {
+        None
+    };
+
+    Ok(PageComplexityStats {
+        page_number: page.page_number,
+        text_length,
+        text_coverage,
+        has_substantial_images: has_images,
+        uncovered_vector_area,
+        is_garbled,
+        page_area,
+        needs_ocr,
+    })
+}
+
 /// Render pages that need OCR from an already-open document.
 ///
 /// The pdfium `Document` holds raw pointers that are not `Send`, so callers must
@@ -33,54 +115,10 @@ pub(crate) fn render_pages_for_ocr(
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let mut rendered = Vec::new();
     for (idx, page) in pages.iter().enumerate() {
-        // Count only usable native text. Substitution-cipher-style corrupt
-        // encodings (e.g. PDFs with a broken cmap) produce long "text" that looks
-        // populated but is unreadable — without this, such pages bypass OCR
-        // because text_length >= 20 and coverage looks fine. The same applies to
-        // unmappable items (Type3 fonts with no ToUnicode), whose text is a
-        // char-code fallback and whose bounding boxes come from deceptive
-        // declared metrics.
-        let text_length: usize = page
-            .text_items
-            .iter()
-            .filter(|item| !is_unusable_native(item))
-            .map(|item| item.text.len())
-            .sum();
         let page_obj = document.page((page.page_number - 1) as i32)?;
-        let has_images = !page_obj.image_bounds(25.0, 0.9).is_empty();
+        let page_complexity = calculate_page_complexity(page, &page_obj)?;
 
-        let page_area = page.page_width * page.page_height;
-        let text_bbox_area: f32 = page
-            .text_items
-            .iter()
-            .filter(|item| !is_unusable_native(item))
-            .map(|item| item.width * item.height)
-            .sum();
-        let text_coverage = if page_area > 0.0 {
-            text_bbox_area / page_area
-        } else {
-            0.0
-        };
-
-        // Low spatial coverage only signals a scan/sparse page when there also
-        // isn't much native text. A text-dense page (e.g. a ruled table with
-        // wide intra-cell whitespace) is spatially sparse but needs no OCR.
-        let sparse_text = text_length < 2000 && text_coverage < 0.15;
-        let mut needs_ocr = text_length < 20 || sparse_text || has_images || page_is_garbled(page);
-
-        // Text drawn as filled vector outlines lives outside the text layer
-        // entirely: no text items, no image XObjects, so none of the above
-        // triggers fire on a text-dense page. Detect it by measuring filled
-        // path area that native text doesn't account for. Checked last so the
-        // page-object walk only runs when the cheap predicates all pass.
-        if !needs_ocr {
-            let path_bounds = page_obj.filled_path_bounds(3.0, 0.9);
-            let uncovered = uncovered_path_area(&path_bounds, &page.text_items);
-
-            needs_ocr = uncovered >= UNCOVERED_VECTOR_AREA_THRESHOLD;
-        }
-
-        if !needs_ocr {
+        if !page_complexity.needs_ocr {
             continue;
         }
 
