@@ -444,6 +444,33 @@ cd packages/wasm && npm run build
 
 We provide a fairly rich `AGENTS.md`/`CLAUDE.md` that we recommend using to help with development + coding agents.
 
+## turbovec Integration: Local Document Intelligence Pipeline
+
+[**turbovec**](https://github.com/RyanCodrai/turbovec) is a Rust vector search engine built on Google Research's TurboQuant algorithm. It compresses vector embeddings 8x, requires no training step, and runs entirely locally. Together with LiteParse, it forms a single-language, fully air-gapped document intelligence stack.
+
+### The pipeline
+
+1. **LiteParse** extracts text from PDFs, DOCX, images, and other formats, producing structured markdown or JSON with bounding boxes.
+2. An embedding model converts the extracted text into vector representations.
+3. **turbovec** indexes those vectors with online ingest (no training step, no rebuilds) and provides fast semantic search.
+
+Both components are Rust. Both run locally. No cloud, no external API, no data leaving the machine.
+
+### Why this matters
+
+For privacy-sensitive use cases (legal discovery, classified document analysis, healthcare records, regulatory compliance research), this pipeline enables semantic search over document collections without ever sending data to a third party:
+
+- **Legal discovery** (AutoDiscovery.legal): Parse case files with LiteParse, index with turbovec, search by meaning instead of keywords.
+- **Regulatory compliance**: Parse MiCA, HIPAA, SOC 2 regulatory PDFs with LiteParse, index with turbovec, ask "which sections apply to payment tokens?" and get semantic matches.
+- **Classified intelligence** (SCIFz): Parse classified PDFs inside a sealed enclave, index with turbovec, search by semantic meaning with clearance-level allowlist filtering.
+- **Healthcare records** (safeHealthData): Parse medical records with LiteParse, index with turbovec, search by symptom or condition without exposing raw patient data to cloud services.
+
+### Rust synergy
+
+Both LiteParse and turbovec are written in Rust. A document intelligence pipeline built on both is a single-language stack with no foreign function interface overhead, no garbage collection pauses, and the memory safety guarantees Rust provides. This is the same design philosophy: fast, local, privacy-first.
+
+---
+
 ## License
 
 Apache 2.0
